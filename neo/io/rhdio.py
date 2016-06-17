@@ -23,6 +23,26 @@ from neo.io.baseio import BaseIO
 from neo.core import Segment, AnalogSignalArray, SpikeTrain, EventArray
 from intanutil import load_intan_rhd_format as rhd
 
+def convert_digital_to_metadata(signal, code_length=384, bits_per_char=8):
+    dig_on = np.nonzero(signal)[0]
+    gaps = np.hstack([np.array(np.inf), np.diff(dig_on)])
+    starts = dig_on[gaps > code_length]
+    codes = list()
+    for start in starts:
+        code = binary_converter(signal[start + 1: start + 1 + code_length], bits_per_char)
+        codes.append((start, code))
+
+    return codes
+
+def binary_converter(code, bits_per_char):
+    num_vals = len(code) / bits_per_char
+    vals = np.zeros(num_vals)
+    for ii in range(num_vals):
+        binvec = code[ii * bits_per_char: (ii + 1) * bits_per_char]
+        vals[ii] = np.sum((2 ** np.arange(bits_per_char - 1, -1, -1)) * binvec)
+
+    return map(chr, vals.astype(np.int8))
+
 class RHDIO(BaseIO):
 
     is_readable = True # This class can only read data
@@ -30,7 +50,7 @@ class RHDIO(BaseIO):
 
     # This class is able to directly or indirectly handle the following objects
     # You can notice that this greatly simplifies the full Neo object hierarchy
-    supported_objects  = [ Segment , AnalogSignal, SpikeTrain, EventArray ]
+    supported_objects  = [ Segment , AnalogSignalArray]
 
     # This class can return either a Block or a Segment
     # The first one is the default ( self.read )
@@ -125,7 +145,8 @@ class RHDIO(BaseIO):
 
         # Create analog signals
         # First start with amplifier data
-        amplifier_signals = AnalogSignalArray(data["amplifier_data"].T,
+        amplifier_data = data.pop("amplifier_data").T.copy()
+        amplifier_signals = AnalogSignalArray(amplifier_data,
                                               name="Amplifier",
                                               units=pq.microvolt,
                                               t_start=0*pq.s,
@@ -135,7 +156,8 @@ class RHDIO(BaseIO):
         # Now get ADC channel data
         # TODO: Is this in volt or millivolt?
         # In each dictionary is a lot of useful information about the channel.
-        adc_signals = AnalogSignalArray(data["board_adc_data"].T,
+        adc_data = data.pop("board_adc_data").T.copy()
+        adc_signals = AnalogSignalArray(adc_data,
                                         name="Board ADC",
                                         units=pq.millivolt,
                                         t_start=0*pq.s,
@@ -144,7 +166,8 @@ class RHDIO(BaseIO):
 
         # Import aux data
         # TODO: Is this in volt or millivolt?
-        aux_signals = AnalogSignalArray(data["aux_input_data"].T,
+        aux_data = data.pop("aux_input_data").T.copy()
+        aux_signals = AnalogSignalArray(aux_data,
                                         name="AUX Input",
                                         units=pq.volt,
                                         t_start=0*pq.s,
