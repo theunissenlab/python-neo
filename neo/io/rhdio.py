@@ -21,7 +21,7 @@ from neo.io.baseio import BaseIO
 
 # to import from core
 from neo.core import Segment, AnalogSignalArray, SpikeTrain, EventArray
-from intanutil import load_intan_rhd_format as rhd
+from intanutil import load_intan_rhd_format, read_header
 
 def convert_digital_to_metadata(signal, code_length=384, bits_per_char=8):
     dig_on = np.nonzero(signal)[0]
@@ -43,25 +43,26 @@ def binary_converter(code, bits_per_char):
 
     return map(chr, vals.astype(np.int8))
 
+
 class RHDIO(BaseIO):
 
-    is_readable = True # This class can only read data
-    is_writable = False # write is not supported
+    is_readable = True  # This class can only read data
+    is_writable = False  # write is not supported
 
     # This class is able to directly or indirectly handle the following objects
     # You can notice that this greatly simplifies the full Neo object hierarchy
-    supported_objects  = [ Segment , AnalogSignalArray]
+    supported_objects = [Segment, AnalogSignalArray]
 
     # This class can return either a Block or a Segment
     # The first one is the default ( self.read )
     # These lists should go from highest object to lowest object because
     # common_io_test assumes it.
-    readable_objects    = [Segment]
+    readable_objects = [Segment]
     # This class is not able to write objects
-    writeable_objects   = [ ]
+    writeable_objects = []
 
-    has_header         = False
-    is_streameable     = False
+    has_header = False
+    is_streameable = False
 
     # This is for GUI stuff : a definition for parameters when reading.
     # This dict should be keyed by object (`Block`). Each entry is a list
@@ -82,22 +83,23 @@ class RHDIO(BaseIO):
         }
 
     # do not supported write so no GUI stuff
-    write_params       = None
+    write_params = None
 
-    name               = 'RHD'
+    name = 'RHD'
 
-    extensions          = [ 'rhd' ]
+    extensions = ['rhd']
 
     # mode can be 'file' or 'dir' or 'fake' or 'database'
     # the main case is 'file' but some reader are base on a directory or a database
     # this info is for GUI stuff also
     mode = 'file'
 
-    def __init__(self , filename = None) :
+    def __init__(self, filename=None):
         """
         Arguments:
             filename : the filename
         """
+
         BaseIO.__init__(self)
         self.filename = filename
         # Seed so all instances can return the same values
@@ -105,43 +107,44 @@ class RHDIO(BaseIO):
 
     # Segment reading is supported so I define this :
     def read_segment(self,
-                     # the 2 first keyword arguments are imposed by neo.io API
-                     lazy = False,
-                     cascade = True,
-                     # all following arguments are decied by this IO and are free
-                     segment_duration = 15.,
-                     num_analogsignal = 4,
-                     num_spiketrain_by_channel = 3,
-                    ):
+                     lazy=False,
+                     cascade=True):
         """
         Return an RHD segment loaded from self.filename.
 
-        Parameters:
-            segment_duration :is the size in secend of the segment.
-            num_analogsignal : number of AnalogSignal in this segment
-            num_spiketrain : number of SpikeTrain in this segment
-
-
         TODO:
         - Add channel data as annotations somewhere
-        - Placeholder for supply voltage (what is this?? Import as analog signal?)
         - Placeholder for spike triggers (Can this be used to import spiketrains?)
-        - Notes as segment annotations
-        - Frequency parameters, annotate segment with other keys
         - Import aux input data as analog signals?
         - What to do about digital output channels?
         - How to handle channels that don't exist?
         - Add lazy loading
-        - Add cascade something or other
         - Add logging
         """
-
-        data = rhd.read_data(self.filename)
 
         # Create a segment
         # TODO: Parse filename for recording time
         # TODO: Add data["notes"] as annotations on the segment
         segment = Segment(name=self.filename, file_origin=self.filename)
+
+        # Read the header to get segment metadata
+        with open(self.filename, "rb") as fid:
+            header = read_header.read_header(fid)
+
+        # Annotate with all frequency_parameter keys that do not end in sample_rate
+        segment_annotations = dict([(key, val) for key, val in header["frequency_parameters"] if not key.endswith("sample_rate")])
+
+        # Also add all of notes
+        for note_name, note in header["notes"]:
+            segment_annotations[note_name] = note
+
+        segment.annotate(**segment_annotations)
+
+        if cascade is False:
+            return segment
+
+        if lazy is False:
+            data = load_intan_rhd_format.read_data(self.filename)
 
         # Create analog signals
         # First start with amplifier data
@@ -154,18 +157,16 @@ class RHDIO(BaseIO):
         segment.analogsignalarrays.append(amplifier_signals)
 
         # Now get ADC channel data
-        # TODO: Is this in volt or millivolt?
         # In each dictionary is a lot of useful information about the channel.
         adc_data = data.pop("board_adc_data").T.copy()
         adc_signals = AnalogSignalArray(adc_data,
                                         name="Board ADC",
-                                        units=pq.millivolt,
+                                        units=pq.volt,
                                         t_start=0*pq.s,
                                         sampling_rate=data["frequency_parameters"]["board_adc_sample_rate"]*pq.Hz)
         segment.analogsignalarrays.append(adc_signals)
 
         # Import aux data
-        # TODO: Is this in volt or millivolt?
         aux_data = data.pop("aux_input_data").T.copy()
         aux_signals = AnalogSignalArray(aux_data,
                                         name="AUX Input",
