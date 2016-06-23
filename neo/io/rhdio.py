@@ -20,7 +20,7 @@ import quantities as pq
 from neo.io.baseio import BaseIO
 
 # to import from core
-from neo.core import Segment, AnalogSignalArray, SpikeTrain, EventArray
+from neo.core import Segment, AnalogSignalArray, SpikeTrain, EventArray, RecordingChannelGroup
 from intanutil import load_intan_rhd_format, read_header
 
 def convert_digital_to_metadata(signal, code_length=384, bits_per_char=8):
@@ -108,11 +108,13 @@ class RHDIO(BaseIO):
     # Segment reading is supported so I define this :
     def read_segment(self,
                      lazy=False,
-                     cascade=True):
+                     cascade=True,
+                     **kwargs):
         """
         Return an RHD segment loaded from self.filename.
 
         TODO:
+        - Is recording time a default component of the filename?
         - Add channel data as annotations somewhere
         - Placeholder for spike triggers (Can this be used to import spiketrains?)
         - Import aux input data as analog signals?
@@ -123,8 +125,6 @@ class RHDIO(BaseIO):
         """
 
         # Create a segment
-        # TODO: Parse filename for recording time
-        # TODO: Add data["notes"] as annotations on the segment
         segment = Segment(name=self.filename, file_origin=self.filename)
 
         # Read the header to get segment metadata
@@ -147,23 +147,26 @@ class RHDIO(BaseIO):
             data = load_intan_rhd_format.read_data(self.filename)
 
         # Create analog signals
-        # First start with amplifier data
+        # First start with amplifier data which comes from the Intan chip
         amplifier_data = data.pop("amplifier_data").T.copy()
         amplifier_signals = AnalogSignalArray(amplifier_data,
                                               name="Amplifier",
                                               units=pq.microvolt,
                                               t_start=0*pq.s,
-                                              sampling_rate=data["frequency_parameters"]["amplifier_sample_rate"]*pq.Hz)
+                                              sampling_rate=data["frequency_parameters"]["amplifier_sample_rate"]*pq.Hz,
+                                              channel_index=data.pop("amplifier_channels"),
+                                              file_origin=self.filename)
         segment.analogsignalarrays.append(amplifier_signals)
 
-        # Now get ADC channel data
-        # In each dictionary is a lot of useful information about the channel.
+        # Now get ADC channel data. This is additonal analog inputs to the Intan board
         adc_data = data.pop("board_adc_data").T.copy()
         adc_signals = AnalogSignalArray(adc_data,
                                         name="Board ADC",
                                         units=pq.volt,
                                         t_start=0*pq.s,
-                                        sampling_rate=data["frequency_parameters"]["board_adc_sample_rate"]*pq.Hz)
+                                        sampling_rate=data["frequency_parameters"]["board_adc_sample_rate"]*pq.Hz,
+                                        channel_index=data.pop("board_adc_channels"),
+                                        file_origin=self.filename)
         segment.analogsignalarrays.append(adc_signals)
 
         # Import aux data
@@ -172,12 +175,29 @@ class RHDIO(BaseIO):
                                         name="AUX Input",
                                         units=pq.volt,
                                         t_start=0*pq.s,
-                                        sampling_rate=data["frequency_parameters"]["aux_input_sample_rate"]*pq.Hz)
-
+                                        sampling_rate=data["frequency_parameters"]["aux_input_sample_rate"]*pq.Hz,
+                                        channel_index=data.pop("aux_input_channels"),
+                                        file_origin=self.filename)
         segment.analogsignalarrays.append(aux_signals)
+
         # Create event arrays from digital inputs
         # Loop through all rows of the digital input data and create event arrays
-
+        for ii in range(data["board_dig_in_data"])
         segment.create_many_to_one_relationship()
 
         return segment
+
+    def read_block(self, lazy=False, cascade=True, **kwargs):
+
+        bl = Block(name=self.filename, file_origin=self.filename)
+        segment = self.read_segment(lazy=lazy, cascade=cascade, **kwargs)
+
+        # Create a RecordingChannelGroup for each AnalogSignalArray
+        for asigarray in segment.analogsignalarrays:
+            rcg = RecordingChannelGroup(name=)
+        bl.segments.append(segment)
+
+
+        bl.create_many_to_one_relationship()
+
+        return bl
