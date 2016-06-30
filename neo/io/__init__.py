@@ -64,6 +64,8 @@ Classes:
 
 .. autoclass:: neo.io.RawBinarySignalIO
 
+.. autoclass:: neo.io.RHDIO
+
 .. autoclass:: neo.io.StimfitIO
 
 .. autoclass:: neo.io.TdtIO
@@ -122,6 +124,7 @@ from neo.io.plexonio import PlexonIO
 from neo.io.pynnio import PyNNNumpyIO
 from neo.io.pynnio import PyNNTextIO
 from neo.io.rawbinarysignalio import RawBinarySignalIO
+from neo.io.rhdio import RHDIO
 from neo.io.spike2io import Spike2IO
 from neo.io.stimfitio import StimfitIO
 from neo.io.tdtio import TdtIO

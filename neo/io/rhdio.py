@@ -17,26 +17,6 @@ from neo.io.baseio import BaseIO
 from neo.core import Block, Segment, AnalogSignalArray, EventArray, RecordingChannelGroup
 from intanutil import load_intan_rhd_format, read_header
 
-def convert_digital_to_metadata(signal, code_length=384, bits_per_char=8):
-    dig_on = np.nonzero(signal)[0]
-    gaps = np.hstack([np.array(np.inf), np.diff(dig_on)])
-    starts = dig_on[gaps > code_length]
-    codes = list()
-    for start in starts:
-        code = binary_converter(signal[start + 1: start + 1 + code_length], bits_per_char)
-        codes.append((start, code))
-
-    return codes
-
-def binary_converter(code, bits_per_char):
-    num_vals = len(code) / bits_per_char
-    vals = np.zeros(num_vals)
-    for ii in range(num_vals):
-        binvec = code[ii * bits_per_char: (ii + 1) * bits_per_char]
-        vals[ii] = np.sum((2 ** np.arange(bits_per_char - 1, -1, -1)) * binvec)
-
-    return map(chr, vals.astype(np.int8))
-
 
 class RHDIO(BaseIO):
 
@@ -195,13 +175,15 @@ class RHDIO(BaseIO):
         # Create event arrays from digital inputs
         # Loop through all rows of the digital input data and create event arrays
         if header["num_board_dig_in_channels"] > 0:
-            sampling_period = (1. / data["frequency_parameters"]["board_dig_in_sample_rate"])*pq.s
+            sampling_rate = data["frequency_parameters"]["board_dig_in_sample_rate"]*pq.Hz
             for ii, digital_signal in enumerate(data["board_dig_in_data"]):
-                times = np.nonzero(digital_signal)[0] * sampling_period
+                times = np.nonzero(digital_signal)[0] / sampling_rate
                 channel = header["board_dig_in_channels"][ii]["native_order"]
                 ea = EventArray(times=times,
                                 name="Digital Input Events {}".format(channel),
-                                file_origin=self.filename)
+                                file_origin=self.filename,
+                                channel_details=header["board_dig_in_channels"][ii],
+                                sampling_rate=sampling_rate)
                 segment.eventarrays.append(ea)
 
         segment.create_many_to_one_relationship()
