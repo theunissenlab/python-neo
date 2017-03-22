@@ -146,3 +146,14 @@ class LazyList(collections.MutableSequence):
 
     def __repr__(self):
         return '<' + self.__class__.__name__ + '>' + self._data.__repr__()
+
+
+def binary_converter(code, bits_per_char):
+    num_vals = len(code) / bits_per_char
+    vals = np.zeros(num_vals)
+    for ii in range(num_vals):
+        binvec = code[ii * bits_per_char: (ii + 1) * bits_per_char]
+        vals[ii] = np.sum((2 ** np.arange(bits_per_char - 1, -1, -1)) * binvec)
+    
+    return "".join(map(chr, vals.astype(np.uint8)))
+

@@ -162,6 +162,7 @@ iolist = [
           PyNNNumpyIO,
           PyNNTextIO,
           RawBinarySignalIO,
+          RHDIO,
           Spike2IO,
           StimfitIO,
           TdtIO,

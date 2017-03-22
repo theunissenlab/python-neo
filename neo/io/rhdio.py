@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Class for "reading" data from Intan RHD files.
-
 Depends on: intanutil
-
 Supported: Read
-
 Author: theunissen lab
 """
 
@@ -14,8 +11,10 @@ from __future__ import absolute_import
 import numpy as np
 import quantities as pq
 from neo.io.baseio import BaseIO
-from neo.core import Block, Segment, AnalogSignalArray, EventArray, RecordingChannelGroup
+from neo.core import Block, Segment, AnalogSignal, Event, ChannelIndex
 from intanutil import load_intan_rhd_format, read_header
+
+from os.path import basename
 
 
 class RHDIO(BaseIO):
@@ -25,7 +24,7 @@ class RHDIO(BaseIO):
 
     # This class is able to directly or indirectly handle the following objects
     # You can notice that this greatly simplifies the full Neo object hierarchy
-    supported_objects = [Segment, AnalogSignalArray]
+    supported_objects = [Segment, AnalogSignal]
 
     # This class can return either a Block or a Segment
     # The first one is the default ( self.read )
@@ -46,13 +45,13 @@ class RHDIO(BaseIO):
     # Note that if the highest-level object requires parameters,
     # common_io_test will be skipped.
     read_params = {
-        Segment : [
+        Segment: [
             ('segment_duration',
-                {'value' : 15., 'label' : 'Segment size (s.)'}),
+                {'value': 15., 'label': 'Segment size (s.)'}),
             ('num_analogsignal',
-                {'value' : 8, 'label' : 'Number of recording points'}),
+                {'value': 8, 'label': 'Number of recording points'}),
             ('num_spiketrain_by_channel',
-                {'value' : 3, 'label' : 'Num of spiketrains'}),
+                {'value': 3, 'label': 'Num of spiketrains'}),
             ],
         }
 
@@ -80,23 +79,25 @@ class RHDIO(BaseIO):
     def read_segment(self,
                      lazy=False,
                      cascade=True,
+                     block=None,
                      **kwargs):
         """
         Return an RHD segment loaded from self.filename.
-
         TODO: Is recording time a default component of the filename?
         TODO: Should channels be native_order or custom_order?
         """
 
         # Create a segment
-        segment = Segment(name=self.filename, file_origin=self.filename)
+        segment = Segment(name=basename(self.filename), file_origin=self.filename)
 
         # Read the header to get segment metadata
         with open(self.filename, "rb") as fid:
             header = read_header.read_header(fid)
 
         # Annotate with all frequency_parameter keys that do not end in sample_rate
-        segment_annotations = dict((key, val) for key, val in header["frequency_parameters"].items() if not key.endswith("sample_rate"))
+        segment_annotations = dict((key, val) for key, val
+                                   in header["frequency_parameters"].items()
+                                   if not key.endswith("sample_rate"))
 
         # Also add all of notes
         for note_name, note in header["notes"].items():
@@ -122,17 +123,24 @@ class RHDIO(BaseIO):
             signals = np.array([])
 
         channels = [ch["native_order"] for ch in header["amplifier_channels"]]
-        sampling_rate = header["frequency_parameters"]["amplifier_sample_rate"]*pq.Hz
-        signals = AnalogSignalArray(signals,
-                                    name="Amplifier",
-                                    units=pq.microvolt,
-                                    t_start=0*pq.s,
-                                    sampling_rate=sampling_rate,
-                                    channel_index=channels,
-                                    file_origin=self.filename,
-                                    channel_details=header["amplifier_channels"],
-                                    copy=False)
-        segment.analogsignalarrays.append(signals)
+        channel_names = [ch["native_channel_name"] for ch in
+                         header["amplifier_channels"]]
+        sampling_rate = header["frequency_parameters"]["amplifier_sample_rate"]
+        channel_idx = ChannelIndex(name='Amplifier', index=channels,
+                                   channel_names=channel_names,
+                                   channel_details=header["amplifier_channels"])
+        signals = AnalogSignal(signals,
+                               name="Amplifier",
+                               units=pq.microvolt,
+                               t_start=0*pq.s,
+                               sampling_rate=sampling_rate*pq.Hz,
+                               file_origin=self.filename,
+                               copy=False)
+        channel_idx.analogsignals.append(signals)
+        segment.analogsignals.append(signals)
+        block.channel_indexes.append(channel_idx)
+        block.create_many_to_one_relationship(force=True, recursive=True)
+        block.create_many_to_many_relationship()
 
         # Now get ADC channel data. This is additonal analog inputs to the Intan board
         if header["num_board_adc_channels"] > 0:
@@ -141,17 +149,24 @@ class RHDIO(BaseIO):
             else:
                 signals = np.array([])
             channels = [ch["native_order"] for ch in header["board_adc_channels"]]
-            sampling_rate = header["frequency_parameters"]["board_adc_sample_rate"]*pq.Hz
-            signals = AnalogSignalArray(signals,
-                                        name="Board ADC",
-                                        units=pq.volt,
-                                        t_start=0*pq.s,
-                                        sampling_rate=sampling_rate,
-                                        channel_index=channels,
-                                        file_origin=self.filename,
-                                        channel_details=header["board_adc_channels"],
-                                        copy=False)
-            segment.analogsignalarrays.append(signals)
+            channel_names = [ch["native_channel_name"] for ch in
+                             header["board_adc_channels"]]
+            sampling_rate = header["frequency_parameters"]["board_adc_sample_rate"]
+            channel_idx = ChannelIndex(name='ADC', index=channels,
+                                       channel_names=channel_names,
+                                       channel_details=header["board_adc_channels"])
+            signals = AnalogSignal(signals,
+                                   name="Board ADC",
+                                   units=pq.volt,
+                                   t_start=0*pq.s,
+                                   sampling_rate=sampling_rate*pq.Hz,
+                                   file_origin=self.filename,
+                                   copy=False)
+            channel_idx.analogsignals.append(signals)
+            segment.analogsignals.append(signals)
+            block.channel_indexes.append(channel_idx)
+            block.create_many_to_one_relationship(force=True, recursive=True)
+            block.create_many_to_many_relationship()
 
         # Import aux data
         if header["num_aux_input_channels"] > 0:
@@ -160,32 +175,55 @@ class RHDIO(BaseIO):
             else:
                 signals = np.array([])
             channels = [ch["native_order"] for ch in header["aux_input_channels"]]
-            sampling_rate = header["frequency_parameters"]["aux_input_sample_rate"]*pq.Hz
-            signals = AnalogSignalArray(signals,
-                                        name="AUX Input",
-                                        units=pq.volt,
-                                        t_start=0*pq.s,
-                                        sampling_rate=sampling_rate,
-                                        channel_index=channels,
-                                        file_origin=self.filename,
-                                        channel_details=header["aux_input_channels"],
-                                        copy=False)
-            segment.analogsignalarrays.append(signals)
+            channel_names = [ch["native_channel_name"] for ch in
+                             header["aux_input_channels"]]
+            sampling_rate = header["frequency_parameters"]["aux_input_sample_rate"]
+            channel_idx = ChannelIndex(name='AuxData', index=channels,
+                                       channel_names=channel_names,
+                                       channel_details=header["aux_input_channels"])
+            signals = AnalogSignal(signals,
+                                   name="AUX Input",
+                                   units=pq.volt,
+                                   t_start=0*pq.s,
+                                   sampling_rate=sampling_rate*pq.Hz,
+                                   file_origin=self.filename,
+                                   copy=False)
+            channel_idx.analogsignals.append(signals)
+            segment.analogsignals.append(signals)
+            block.channel_indexes.append(channel_idx)
+            block.create_many_to_one_relationship(force=True, recursive=True)
+            block.create_many_to_many_relationship()
 
         # Create event arrays from digital inputs
         # Loop through all rows of the digital input data and create event arrays
         if header["num_board_dig_in_channels"] > 0:
-            sampling_rate = data["frequency_parameters"]["board_dig_in_sample_rate"]*pq.Hz
+            sampling_rate = data["frequency_parameters"]["board_dig_in_sample_rate"]
+            # channel = header["board_dig_in_channels"][ii]["native_order"]
+            channels = [ch["native_order"] for ch in header["board_dig_in_channels"]]
+            channel_names = [ch["native_channel_name"] for ch in
+                             header["board_dig_in_channels"]]
+            channel_idx = ChannelIndex(name='EventData', index=channels,
+                                       channel_names=channel_names,
+                                       channel_details=header["board_dig_in_channels"])
             for ii, digital_signal in enumerate(data["board_dig_in_data"]):
                 times = np.nonzero(digital_signal)[0] / sampling_rate
+                print 'times: ' + str(times)
+                if len(times) < 1:
+                    continue
                 channel = header["board_dig_in_channels"][ii]["native_order"]
-                ea = EventArray(times=times,
-                                name="Digital Input Events {}".format(channel),
-                                file_origin=self.filename,
-                                channel_details=header["board_dig_in_channels"][ii],
-                                sampling_rate=sampling_rate)
-                segment.eventarrays.append(ea)
-
+                ea = Event(times=times*pq.s,
+                           name="Digital Input Events {}".format(channel),
+                           channel_ids=channels[ii],
+                           channel_names=channel_names[ii],
+                           file_origin=self.filename,
+                        #    channel_details=header["board_dig_in_channels"][ii],
+                           sampling_rate=sampling_rate*pq.Hz)
+                print 'EVENT: ' + str(ea)
+                #channel_idx.events.append(ea)
+                segment.events.append(ea)
+            block.channel_indexes.append(channel_idx)
+            block.create_many_to_one_relationship(force=True, recursive=True)
+            block.create_many_to_many_relationship()
         segment.create_many_to_one_relationship()
 
         del data
@@ -193,33 +231,10 @@ class RHDIO(BaseIO):
         return segment
 
     def read_block(self, lazy=False, cascade=True, **kwargs):
-
-        bl = Block(name=self.filename, file_origin=self.filename)
-        segment = self.read_segment(lazy=lazy, cascade=cascade, **kwargs)
-
-        # Create a RecordingChannelGroup for each AnalogSignalArray
-        for asigarray in segment.analogsignalarrays:
-            channel_names = [ch["native_channel_name"] for ch in asigarray.annotations["channel_details"]]
-            rcg = RecordingChannelGroup(name="RCG {}".format(asigarray.name),
-                                        channel_indexes=asigarray.channel_index,
-                                        channel_names=channel_names,
-                                        channel_details=asigarray.annotations["channel_details"])
-            rcg.analogsignalarrays.append(asigarray)
-            bl.recordingchannelgroups.append(rcg)
+        bl = Block(name=basename(self.filename), file_origin=self.filename)
+        segment = self.read_segment(lazy=lazy, cascade=cascade, block=bl, **kwargs)
 
         bl.segments.append(segment)
         bl.create_many_to_one_relationship()
 
         return bl
-
-
-if __name__ == "__main__":
-
-    # RHD file path
-    filename = "/auto/tdrive/tlee/rhd_data/hpg8003_day_2_160503_095828.rhd"
-
-    # Instantiate the IO class
-    importer = RHDIO(filename)
-
-    # Read the block corresponding to this file
-    blk = importer.read_block()
