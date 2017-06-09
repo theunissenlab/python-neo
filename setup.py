@@ -6,7 +6,10 @@ import os
 
 long_description = open("README.rst").read()
 install_requires = ['numpy>=1.7.1',
-                    'quantities>=0.9.0']
+                    'quantities==0.11.1dev']
+dependency_links = [
+    'http://github.com/python-quantities/python-quantities/tarball/master#egg=quantities-0.11.1dev'
+]
 extras_require = {
     'hdf5io': ['h5py'],
     'igorproio': ['igor'],
@@ -28,6 +31,7 @@ setup(
     extras_require=extras_require,
     author = "Neo authors and contributors",
     author_email = "samuel.garcia@cnrs.fr",
+    dependency_links=dependency_links,
     description = "Neo is a package for representing electrophysiology data in Python, together with support for reading a wide range of neurophysiology file formats",
     long_description = long_description,
     license = "BSD-3-Clause",
