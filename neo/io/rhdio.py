@@ -207,7 +207,6 @@ class RHDIO(BaseIO):
                                        channel_details=header["board_dig_in_channels"])
             for ii, digital_signal in enumerate(data["board_dig_in_data"]):
                 times = np.nonzero(digital_signal)[0] / sampling_rate
-                print 'times: ' + str(times)
                 if len(times) < 1:
                     continue
                 channel = header["board_dig_in_channels"][ii]["native_order"]
@@ -218,7 +217,6 @@ class RHDIO(BaseIO):
                            file_origin=self.filename,
                         #    channel_details=header["board_dig_in_channels"][ii],
                            sampling_rate=sampling_rate*pq.Hz)
-                print 'EVENT: ' + str(ea)
                 #channel_idx.events.append(ea)
                 segment.events.append(ea)
             block.channel_indexes.append(channel_idx)
