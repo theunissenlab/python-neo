@@ -23,6 +23,7 @@ from datetime import datetime
 from collections import Iterable
 import itertools
 from hashlib import md5
+from uuid import uuid4
 
 import quantities as pq
 import numpy as np
@@ -112,10 +113,12 @@ class NixIO(BaseIO):
                              "Valid modes: 'ro' (ReadOnly)', 'rw' (ReadWrite),"
                              " 'ow' (Overwrite).".format(mode))
         self.nix_file = nix.File.open(self.filename, filemode, backend="h5py")
-        self._object_map = dict()
+        self._neo_map = dict()
+        self._nix_map = dict()
         self._lazy_loaded = list()
         self._object_hashes = dict()
         self._block_read_counter = 0
+        self._path_map = dict()
 
     def __enter__(self):
         return self
@@ -132,7 +135,6 @@ class NixIO(BaseIO):
     def read_block(self, path="/", cascade=True, lazy=False):
         if path == "/":
             try:
-                # Use yield?
                 nix_block = self.nix_file.blocks[self._block_read_counter]
                 path += nix_block.name
                 self._block_read_counter += 1
@@ -155,7 +157,7 @@ class NixIO(BaseIO):
             self._read_cascade(nix_group, path, cascade, lazy)
         self._update_maps(neo_segment, lazy)
         nix_parent = self._get_parent(path)
-        neo_parent = self._get_mapped_object(nix_parent)
+        neo_parent = self._neo_map.get(nix_parent.name)
         if neo_parent:
             neo_segment.block = neo_parent
         return neo_segment
@@ -168,7 +170,7 @@ class NixIO(BaseIO):
             self._read_cascade(nix_source, path, cascade, lazy)
         self._update_maps(neo_rcg, lazy)
         nix_parent = self._get_parent(path)
-        neo_parent = self._get_mapped_object(nix_parent)
+        neo_parent = self._neo_map.get(nix_parent.name)
         neo_rcg.block = neo_parent
         return neo_rcg
 
@@ -195,7 +197,7 @@ class NixIO(BaseIO):
         if self._find_lazy_loaded(neo_signal) is None:
             self._update_maps(neo_signal, lazy)
             nix_parent = self._get_parent(path)
-            neo_parent = self._get_mapped_object(nix_parent)
+            neo_parent = self._neo_map.get(nix_parent.name)
             neo_signal.segment = neo_parent
         return neo_signal
 
@@ -211,7 +213,7 @@ class NixIO(BaseIO):
         neo_eest.path = path
         self._update_maps(neo_eest, lazy)
         nix_parent = self._get_parent(path)
-        neo_parent = self._get_mapped_object(nix_parent)
+        neo_parent = self._neo_map.get(nix_parent.name)
         neo_eest.segment = neo_parent
         return neo_eest
 
@@ -232,20 +234,26 @@ class NixIO(BaseIO):
             self._read_cascade(nix_source, path, cascade, lazy)
         self._update_maps(neo_unit, lazy)
         nix_parent = self._get_parent(path)
-        neo_parent = self._get_mapped_object(nix_parent)
+        neo_parent = self._neo_map.get(nix_parent.name)
         neo_unit.channel_index = neo_parent
         return neo_unit
 
     def _block_to_neo(self, nix_block):
         neo_attrs = self._nix_attr_to_neo(nix_block)
         neo_block = Block(**neo_attrs)
-        self._object_map[nix_block.id] = neo_block
+        neo_block.rec_datetime = datetime.fromtimestamp(
+            nix_block.created_at
+        )
+        self._neo_map[nix_block.name] = neo_block
         return neo_block
 
     def _group_to_neo(self, nix_group):
         neo_attrs = self._nix_attr_to_neo(nix_group)
         neo_segment = Segment(**neo_attrs)
-        self._object_map[nix_group.id] = neo_segment
+        neo_segment.rec_datetime = datetime.fromtimestamp(
+            nix_group.created_at
+        )
+        self._neo_map[nix_group.name] = neo_segment
         return neo_segment
 
     def _source_chx_to_neo(self, nix_source):
@@ -253,21 +261,25 @@ class NixIO(BaseIO):
         chx = list(self._nix_attr_to_neo(c)
                    for c in nix_source.sources
                    if c.type == "neo.channelindex")
-        neo_attrs["channel_names"] = np.array([c["name"] for c in chx],
-                                              dtype="S")
+        chan_names = list(c["neo_name"] for c in chx if "neo_name" in c)
+        chan_ids = list(c["channel_id"] for c in chx if "channel_id" in c)
+        if chan_names:
+            neo_attrs["channel_names"] = chan_names
+        if chan_ids:
+            neo_attrs["channel_ids"] = chan_ids
         neo_attrs["index"] = np.array([c["index"] for c in chx])
         if "coordinates" in chx[0]:
             coord_units = chx[0]["coordinates.units"]
             coord_values = list(c["coordinates"] for c in chx)
             neo_attrs["coordinates"] = pq.Quantity(coord_values, coord_units)
         rcg = ChannelIndex(**neo_attrs)
-        self._object_map[nix_source.id] = rcg
+        self._neo_map[nix_source.name] = rcg
         return rcg
 
     def _source_unit_to_neo(self, nix_unit):
         neo_attrs = self._nix_attr_to_neo(nix_unit)
         neo_unit = Unit(**neo_attrs)
-        self._object_map[nix_unit.id] = neo_unit
+        self._neo_map[nix_unit.name] = neo_unit
         return neo_unit
 
     def _signal_da_to_neo(self, nix_da_group, lazy):
@@ -283,8 +295,8 @@ class NixIO(BaseIO):
         nix_da_group = sorted(nix_da_group, key=lambda d: d.name)
         neo_attrs = self._nix_attr_to_neo(nix_da_group[0])
         metadata = nix_da_group[0].metadata
-        neo_attrs["name"] = stringify(metadata.name)
         neo_type = nix_da_group[0].type
+        neo_attrs["nix_name"] = metadata.name  # use the common base name
 
         unit = nix_da_group[0].unit
         if lazy:
@@ -296,7 +308,7 @@ class NixIO(BaseIO):
             lazy_shape = None
         timedim = self._get_time_dimension(nix_da_group[0])
         if (neo_type == "neo.analogsignal" or
-                isinstance(timedim, nix.pycore.SampledDimension)):
+                timedim.dimension_type == nix.DimensionType.Sample):
             if lazy:
                 sampling_period = pq.Quantity(1, timedim.unit)
                 t_start = pq.Quantity(0, timedim.unit)
@@ -316,8 +328,8 @@ class NixIO(BaseIO):
                 signal=signaldata, sampling_period=sampling_period,
                 t_start=t_start, **neo_attrs
             )
-        elif neo_type == "neo.irregularlysampledsignal"\
-                or isinstance(timedim, nix.pycore.RangeDimension):
+        elif (neo_type == "neo.irregularlysampledsignal"
+              or timedim.dimension_type == nix.DimensionType.Range):
             if lazy:
                 times = pq.Quantity(np.empty(0), timedim.unit)
             else:
@@ -328,7 +340,7 @@ class NixIO(BaseIO):
         else:
             return None
         for da in nix_da_group:
-            self._object_map[da.id] = neo_signal
+            self._neo_map[da.name] = neo_signal
         if lazy_shape:
             neo_signal.lazy_shape = lazy_shape
         return neo_signal
@@ -418,13 +430,13 @@ class NixIO(BaseIO):
                         )
         else:
             return None
-        self._object_map[nix_mtag.id] = eest
+        self._neo_map[nix_mtag.name] = eest
         if lazy_shape:
             eest.lazy_shape = lazy_shape
         return eest
 
     def _read_cascade(self, nix_obj, path, cascade, lazy):
-        neo_obj = self._object_map[nix_obj.id]
+        neo_obj = self._neo_map[nix_obj.name]
         for neocontainer in getattr(neo_obj, "_child_containers", []):
             nixcontainer = self._container_map[neocontainer]
             if not hasattr(nix_obj, nixcontainer):
@@ -452,9 +464,10 @@ class NixIO(BaseIO):
             parent_block_path = "/" + path.split("/")[1]
             parent_block = self._get_object_at(parent_block_path)
             ref_das = self._get_referers(nix_obj, parent_block.data_arrays)
-            ref_signals = self._get_mapped_objects(ref_das)
+            ref_signals = list(self._neo_map[da.name] for da in ref_das)
             # deduplicate by name
-            ref_signals = list(dict((s.name, s) for s in ref_signals).values())
+            ref_signals = list(dict((s.annotations["nix_name"], s)
+                                    for s in ref_signals).values())
             for sig in ref_signals:
                 if isinstance(sig, AnalogSignal):
                     neo_obj.analogsignals.append(sig)
@@ -467,7 +480,7 @@ class NixIO(BaseIO):
             parent_block_path = "/" + path.split("/")[1]
             parent_block = self._get_object_at(parent_block_path)
             ref_mtags = self._get_referers(nix_obj, parent_block.multi_tags)
-            ref_sts = self._get_mapped_objects(ref_mtags)
+            ref_sts = list(self._neo_map[mt.name] for mt in ref_mtags)
             for st in ref_sts:
                 neo_obj.spiketrains.append(st)
                 st.unit = neo_obj
@@ -506,22 +519,25 @@ class NixIO(BaseIO):
         :param neo_blocks: List (or iterable) containing Neo blocks
         :return: A list containing the new NIX Blocks
         """
-        self.resolve_name_conflicts(neo_blocks)
         for bl in neo_blocks:
             self.write_block(bl)
 
     def _write_object(self, obj, loc=""):
+        objtype = type(obj).__name__.lower()
         if isinstance(obj, Block):
             containerstr = "/"
         else:
-            objtype = type(obj).__name__.lower()
             if objtype == "channelindex":
                 containerstr = "/channel_indexes/"
             else:
                 containerstr = "/" + type(obj).__name__.lower() + "s/"
-        self.resolve_name_conflicts(obj)
-        objpath = loc + containerstr + obj.name
-        oldhash = self._object_hashes.get(objpath)
+        if "nix_name" in obj.annotations:
+            nix_name = obj.annotations["nix_name"]
+        else:
+            nix_name = "neo.{}.{}".format(objtype, self._generate_nix_name())
+            obj.annotate(nix_name=nix_name)
+        objpath = loc + containerstr + nix_name
+        oldhash = self._object_hashes.get(nix_name)
         if oldhash is None:
             try:
                 oldobj = self.get(objpath, cascade=False, lazy=False)
@@ -531,6 +547,7 @@ class NixIO(BaseIO):
         newhash = self._hash_object(obj)
         if oldhash != newhash:
             attr = self._neo_attr_to_nix(obj)
+            attr["name"] = nix_name
             if isinstance(obj, pq.Quantity):
                 attr.update(self._neo_data_to_nix(obj))
             if oldhash is None:
@@ -541,27 +558,44 @@ class NixIO(BaseIO):
             if isinstance(obj, pq.Quantity):
                 self._write_data(nixobj, attr, objpath)
         else:
-            nixobj = self._get_object_at(objpath)
-        self._object_map[id(obj)] = nixobj
-        self._object_hashes[objpath] = newhash
+            nixobj = self._nix_map.get(nix_name)
+            if nixobj is None:
+                nixobj = self._get_object_at(objpath)
+            else:
+                # object is already in file but may not be linked at objpath
+                objat = self._get_object_at(objpath)
+                if not objat:
+                    self._link_nix_obj(nixobj, loc, containerstr)
+        self._nix_map[nix_name] = nixobj
+        self._object_hashes[nix_name] = newhash
         self._write_cascade(obj, objpath)
 
     def _create_nix_obj(self, loc, attr):
         parentobj = self._get_object_at(loc)
         if attr["type"] == "block":
             nixobj = parentobj.create_block(attr["name"], "neo.block")
+            nixobj.metadata = self.nix_file.create_section(
+                attr["name"], "neo.block.metadata"
+            )
         elif attr["type"] == "segment":
             nixobj = parentobj.create_group(attr["name"], "neo.segment")
+            nixobj.metadata = parentobj.metadata.create_section(
+                attr["name"], "neo.segment.metadata"
+            )
         elif attr["type"] == "channelindex":
             nixobj = parentobj.create_source(attr["name"],
                                              "neo.channelindex")
+            nixobj.metadata = parentobj.metadata.create_section(
+                attr["name"], "neo.channelindex.metadata"
+            )
         elif attr["type"] in ("analogsignal", "irregularlysampledsignal"):
             blockpath = "/" + loc.split("/")[1]
             parentblock = self._get_object_at(blockpath)
             nixobj = list()
-            typestr = "neo." + attr["type"]
-            parentmd = self._get_or_init_metadata(parentobj, loc)
-            sigmd = parentmd.create_section(attr["name"], typestr+".metadata")
+            typestr = "neo.{}".format(attr["type"])
+            sigmd = parentobj.metadata.create_section(
+                attr["name"], "{}.metadata".format(typestr)
+            )
             for idx, datarow in enumerate(attr["data"]):
                 name = "{}.{}".format(attr["name"], idx)
                 da = parentblock.create_data_array(name, typestr, data=datarow)
@@ -571,19 +605,35 @@ class NixIO(BaseIO):
         elif attr["type"] in ("epoch", "event", "spiketrain"):
             blockpath = "/" + loc.split("/")[1]
             parentblock = self._get_object_at(blockpath)
+            typestr = "neo.{}".format(attr["type"])
             timesda = parentblock.create_data_array(
-                attr["name"]+".times", "neo."+attr["type"]+".times",
+                "{}.times".format(attr["name"]), "{}.times".format(typestr),
                 data=attr["data"]
             )
             nixobj = parentblock.create_multi_tag(
-                attr["name"], "neo."+attr["type"], timesda
+                attr["name"], typestr, timesda
+            )
+            nixobj.metadata = parentobj.metadata.create_section(
+                attr["name"], "{}.metadata".format(typestr)
             )
             parentobj.multi_tags.append(nixobj)
         elif attr["type"] == "unit":
             nixobj = parentobj.create_source(attr["name"], "neo.unit")
+            nixobj.metadata = parentobj.metadata.create_section(
+                attr["name"], "neo.unit.metadata"
+            )
         else:
             raise ValueError("Unable to create NIX object. Invalid type.")
         return nixobj
+
+    def _link_nix_obj(self, obj, loc, neocontainer):
+        parentobj = self._get_object_at(loc)
+        container = getattr(parentobj,
+                            self._container_map[neocontainer.strip("/")])
+        if isinstance(obj, list):
+            container.extend(obj)
+        else:
+            container.append(obj)
 
     def write_block(self, bl, loc=""):
         """
@@ -624,21 +674,27 @@ class NixIO(BaseIO):
         :param chx: The Neo ChannelIndex
         :param loc: Path to the CHX
         """
-        nixsource = self._get_mapped_object(chx)
+        nixsource = self._nix_map[chx.annotations["nix_name"]]
         for idx, channel in enumerate(chx.index):
-            if len(chx.channel_names):
-                channame = stringify(chx.channel_names[idx])
-            else:
-                channame = "{}.ChannelIndex{}".format(chx.name, idx)
+            channame = "{}.ChannelIndex{}".format(chx.annotations["nix_name"],
+                                                  idx)
             if channame in nixsource.sources:
                 nixchan = nixsource.sources[channame]
             else:
                 nixchan = nixsource.create_source(channame,
                                                   "neo.channelindex")
+                nixchan.metadata = nixsource.metadata.create_section(
+                    nixchan.name, "neo.channelindex.metadata"
+                )
             nixchan.definition = nixsource.definition
-            chanpath = loc + "/channelindex/" + channame
-            chanmd = self._get_or_init_metadata(nixchan, chanpath)
+            chanmd = nixchan.metadata
             chanmd["index"] = nix.Value(int(channel))
+            if len(chx.channel_names):
+                neochanname = stringify(chx.channel_names[idx])
+                chanmd["neo_name"] = nix.Value(neochanname)
+            if len(chx.channel_ids):
+                chanid = chx.channel_ids[idx]
+                chanmd["channel_id"] = nix.Value(chanid)
             if chx.coordinates is not None:
                 coords = chx.coordinates[idx]
                 coordunits = stringify(coords[0].dimensionality)
@@ -749,52 +805,30 @@ class NixIO(BaseIO):
          NIX objects.
         """
         for seg in block.segments:
-            group = self._get_mapped_object(seg)
+            group = self._nix_map[seg.annotations["nix_name"]]
             group_signals = self._get_contained_signals(group)
             for mtag in group.multi_tags:
                 if mtag.type in ("neo.epoch", "neo.event"):
                     mtag.references.extend([sig for sig in group_signals
                                             if sig not in mtag.references])
         for rcg in block.channel_indexes:
-            rcgsource = self._get_mapped_object(rcg)
-            das = self._get_mapped_objects(rcg.analogsignals +
-                                           rcg.irregularlysampledsignals)
+            chidxsrc = self._nix_map[rcg.annotations["nix_name"]]
+            das = list(self._nix_map[sig.annotations["nix_name"]]
+                       for sig in rcg.analogsignals +
+                       rcg.irregularlysampledsignals)
             # flatten nested lists
             das = [da for dalist in das for da in dalist]
             for da in das:
-                if rcgsource not in da.sources:
-                    da.sources.append(rcgsource)
+                if chidxsrc not in da.sources:
+                    da.sources.append(chidxsrc)
             for unit in rcg.units:
-                unitsource = self._get_mapped_object(unit)
+                unitsource = self._nix_map[unit.annotations["nix_name"]]
                 for st in unit.spiketrains:
-                    stmtag = self._get_mapped_object(st)
-                    if rcgsource not in stmtag.sources:
-                        stmtag.sources.append(rcgsource)
+                    stmtag = self._nix_map[st.annotations["nix_name"]]
+                    if chidxsrc not in stmtag.sources:
+                        stmtag.sources.append(chidxsrc)
                     if unitsource not in stmtag.sources:
                         stmtag.sources.append(unitsource)
-
-    def _get_or_init_metadata(self, nix_obj, path):
-        """
-        Creates a metadata Section for the provided NIX object if it doesn't
-        have one already. Returns the new or existing metadata section.
-
-        :param nix_obj: The object to which the Section is attached
-        :param path: Path to nix_obj
-        :return: The metadata section of the provided object
-        """
-        parent_parts = path.split("/")[:-2]
-        parent_path = "/".join(parent_parts)
-        if nix_obj.metadata is None:
-            if len(parent_parts) == 0:  # nix_obj is root block
-                parent_metadata = self.nix_file
-            else:
-                obj_parent = self._get_object_at(parent_path)
-                parent_metadata = self._get_or_init_metadata(obj_parent,
-                                                             parent_path)
-            nix_obj.metadata = parent_metadata.create_section(
-                    nix_obj.name, nix_obj.type+".metadata"
-            )
-        return nix_obj.metadata
 
     def _get_object_at(self, path):
         """
@@ -811,6 +845,8 @@ class NixIO(BaseIO):
         :param path: Path string
         :return: The object at the location defined by the path
         """
+        if path in self._path_map:
+            return self._path_map[path]
         if path in ("", "/"):
             return self.nix_file
         parts = path.split("/")
@@ -832,6 +868,7 @@ class NixIO(BaseIO):
                     break
         else:
             obj = parent_container[objname]
+        self._path_map[path] = obj
         return obj
 
     def _get_parent(self, path):
@@ -840,50 +877,34 @@ class NixIO(BaseIO):
         parent_obj = self._get_object_at(parent_path)
         return parent_obj
 
-    def _get_mapped_objects(self, object_list):
-        return list(map(self._get_mapped_object, object_list))
-
-    def _get_mapped_object(self, obj):
-        # We could use paths here instead
-        try:
-            if hasattr(obj, "id"):
-                return self._object_map[obj.id]
-            else:
-                return self._object_map[id(obj)]
-        except KeyError:
-            # raise KeyError("Failed to find mapped object for {}. "
-            #                "Object not yet converted.".format(obj))
-            return None
-
     def _write_attr_annotations(self, nixobj, attr, path):
         if isinstance(nixobj, list):
+            metadata = nixobj[0].metadata
             for obj in nixobj:
                 obj.definition = attr["definition"]
             self._write_attr_annotations(nixobj[0], attr, path)
             return
         else:
+            metadata = nixobj.metadata
             nixobj.definition = attr["definition"]
+        if "neo_name" in attr:
+            metadata["neo_name"] = attr["neo_name"]
         if "created_at" in attr:
             nixobj.force_created_at(calculate_timestamp(attr["created_at"]))
         if "file_datetime" in attr:
-            metadata = self._get_or_init_metadata(nixobj, path)
             self._write_property(metadata,
                                  "file_datetime", attr["file_datetime"])
-            # metadata["file_datetime"] = attr["file_datetime"]
-        if "rec_datetime" in attr and attr["rec_datetime"]:
-            metadata = self._get_or_init_metadata(nixobj, path)
-            # metadata["rec_datetime"] = attr["rec_datetime"]
+        if attr.get("rec_datetime"):
             self._write_property(metadata,
                                  "rec_datetime", attr["rec_datetime"])
 
         if "annotations" in attr:
-            metadata = self._get_or_init_metadata(nixobj, path)
             for k, v in attr["annotations"].items():
                 self._write_property(metadata, k, v)
 
     def _write_data(self, nixobj, attr, path):
         if isinstance(nixobj, list):
-            metadata = self._get_or_init_metadata(nixobj[0], path)
+            metadata = nixobj[0].metadata
             metadata["t_start.units"] = nix.Value(attr["t_start.units"])
             for obj in nixobj:
                 obj.unit = attr["data.units"]
@@ -898,6 +919,7 @@ class NixIO(BaseIO):
                 timedim.label = "time"
                 timedim.offset = attr["t_start"]
         else:
+            metadata = nixobj.metadata
             nixobj.positions.unit = attr["data.units"]
             blockpath = "/" + path.split("/")[1]
             parentblock = self._get_object_at(blockpath)
@@ -916,19 +938,24 @@ class NixIO(BaseIO):
             if "labels" in attr:
                 labeldim = nixobj.positions.append_set_dimension()
                 labeldim.labels = attr["labels"]
-            metadata = self._get_or_init_metadata(nixobj, path)
             if "t_start" in attr:
-                self._write_property(metadata, "t_start", attr["t_start"])
+                metadata["t_start"] = nix.Value(attr["t_start"])
+                metadata["t_start.units"] = nix.Value(attr["t_start.units"])
             if "t_stop" in attr:
-                self._write_property(metadata, "t_stop", attr["t_stop"])
+                metadata["t_stop"] = nix.Value(attr["t_stop"])
+                metadata["t_stop.units"] = nix.Value(attr["t_stop.units"])
             if "waveforms" in attr:
                 wfname = nixobj.name + ".waveforms"
                 if wfname in parentblock.data_arrays:
+                    del metadata.sections[wfname]
                     del parentblock.data_arrays[wfname]
                     del nixobj.features[0]
                 wfda = parentblock.create_data_array(
                     wfname, "neo.waveforms",
                     data=attr["waveforms"]
+                )
+                wfda.metadata = nixobj.metadata.create_section(
+                    wfda.name, "neo.waveforms.metadata"
                 )
                 wfda.unit = attr["waveforms.units"]
                 nixobj.create_feature(wfda, nix.LinkType.Indexed)
@@ -941,11 +968,6 @@ class NixIO(BaseIO):
                     attr["sampling_interval.units"]
                 wftime.unit = attr["times.units"]
                 wftime.label = "time"
-                if wfname in metadata.sections:
-                    wfda.metadata = metadata.sections[wfname]
-                else:
-                    wfpath = path + "/waveforms/" + wfname
-                    wfda.metadata = self._get_or_init_metadata(wfda, wfpath)
                 if "left_sweep" in attr:
                     self._write_property(wfda.metadata, "left_sweep",
                                          attr["left_sweep"])
@@ -957,7 +979,8 @@ class NixIO(BaseIO):
         elif not lazy and objidx is not None:
             self._lazy_loaded.pop(objidx)
         if not lazy:
-            self._object_hashes[obj.path] = self._hash_object(obj)
+            nix_name = obj.annotations["nix_name"]
+            self._object_hashes[nix_name] = self._hash_object(obj)
 
     def _find_lazy_loaded(self, obj):
         """
@@ -974,73 +997,18 @@ class NixIO(BaseIO):
         else:
             return None
 
-    @classmethod
-    def resolve_name_conflicts(cls, objects):
-        """
-        Given a list of neo objects, change their names such that no two
-        objects share the same name. Objects with no name are renamed based on
-        their type.
-        If a container object is supplied (Block, Segment, or RCG), conflicts
-        are resolved for the child objects.
-
-        :param objects: List of Neo objects or Neo container object
-        """
-        if isinstance(objects, list):
-            if not len(objects):
-                return
-            names = [obj.name for obj in objects]
-            for idx, cn in enumerate(names):
-                if not cn:
-                    cn = cls._generate_name(objects[idx])
-                else:
-                    names[idx] = ""
-                if cn not in names:
-                    newname = cn
-                else:
-                    suffix = 1
-                    newname = "{}-{}".format(cn, suffix)
-                    while newname in names:
-                        suffix += 1
-                        newname = "{}-{}".format(cn, suffix)
-                names[idx] = newname
-            for obj, n in zip(objects, names):
-                obj.name = n
-            return
-        if not objects.name:
-            objects.name = cls._generate_name(objects)
-        if isinstance(objects, Block):
-            block = objects
-            allchildren = block.segments + block.channel_indexes
-            cls.resolve_name_conflicts(allchildren)
-            allchildren = list()
-            for seg in block.segments:
-                allchildren.extend(seg.analogsignals +
-                                   seg.irregularlysampledsignals +
-                                   seg.events +
-                                   seg.epochs +
-                                   seg.spiketrains)
-            cls.resolve_name_conflicts(allchildren)
-        elif isinstance(objects, Segment):
-            seg = objects
-            cls.resolve_name_conflicts(seg.analogsignals +
-                                       seg.irregularlysampledsignals +
-                                       seg.events +
-                                       seg.epochs +
-                                       seg.spiketrains)
-        elif isinstance(objects, ChannelIndex):
-            rcg = objects
-            cls.resolve_name_conflicts(rcg.units)
-
     @staticmethod
-    def _generate_name(neoobj):
-        neotype = type(neoobj).__name__
-        return "neo.{}".format(neotype)
+    def _generate_nix_name():
+        return uuid4().hex
 
     @staticmethod
     def _neo_attr_to_nix(neoobj):
         neotype = type(neoobj).__name__
         attrs = dict()
-        attrs["name"] = neoobj.name
+        # NIX metadata does not support None values
+        # The property will be excluded to signify 'name is None'
+        if neoobj.name is not None:
+            attrs["neo_name"] = neoobj.name
         attrs["type"] = neotype.lower()
         attrs["definition"] = neoobj.description
         if isinstance(neoobj, (Block, Segment)):
@@ -1165,8 +1133,7 @@ class NixIO(BaseIO):
     @staticmethod
     def _nix_attr_to_neo(nix_obj):
         neo_attrs = dict()
-        neo_attrs["name"] = stringify(nix_obj.name)
-
+        neo_attrs["nix_name"] = nix_obj.name
         neo_attrs["description"] = stringify(nix_obj.definition)
         if nix_obj.metadata:
             for prop in nix_obj.metadata.props:
@@ -1178,18 +1145,12 @@ class NixIO(BaseIO):
                     neo_attrs[prop.name] = values[0]
                 else:
                     neo_attrs[prop.name] = values
+        neo_attrs["name"] = neo_attrs.get("neo_name")
 
-        if isinstance(nix_obj, (nix.pycore.Block, nix.pycore.Group)):
-            if "rec_datetime" not in neo_attrs:
-                neo_attrs["rec_datetime"] = None
-            neo_attrs["rec_datetime"] = datetime.fromtimestamp(
-                nix_obj.created_at
-            )
         if "file_datetime" in neo_attrs:
             neo_attrs["file_datetime"] = datetime.fromtimestamp(
                 neo_attrs["file_datetime"]
             )
-        # neo_attrs["file_origin"] = os.path.basename(self.filename)
         return neo_attrs
 
     @staticmethod
@@ -1309,7 +1270,6 @@ class NixIO(BaseIO):
                 self.nix_file and self.nix_file.is_open()):
             self.nix_file.close()
             self.nix_file = None
-            self._object_map = None
             self._lazy_loaded = None
             self._object_hashes = None
             self._block_read_counter = None
