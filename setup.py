@@ -6,9 +6,8 @@ import os
 
 long_description = open("README.rst").read()
 install_requires = ['numpy>=1.7.1',
-                    'quantities==0.11.1dev']
+                    'quantities==0.12']
 dependency_links = [
-    'http://github.com/python-quantities/python-quantities/tarball/master#egg=quantities-0.11.1dev'
 ]
 extras_require = {
     'hdf5io': ['h5py'],
