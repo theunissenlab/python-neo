@@ -292,10 +292,11 @@ class NixIO(BaseIO):
         :param nix_da_group: a list of NIX DataArray objects
         :return: a Neo Signal object
         """
-        nix_da_group = sorted(nix_da_group, key=lambda d: d.name)
         neo_attrs = self._nix_attr_to_neo(nix_da_group[0])
         metadata = nix_da_group[0].metadata
         neo_type = nix_da_group[0].type
+
+        neo_attrs["corrected_index"] = 1  # Array order used to be sorted by name
         neo_attrs["nix_name"] = metadata.name  # use the common base name
 
         unit = nix_da_group[0].unit
