@@ -80,6 +80,7 @@ class RHDIO(BaseIO):
                      lazy=False,
                      cascade=True,
                      block=None,
+                     storeDIG=True,
                      **kwargs):
         """
         Return an RHD segment loaded from self.filename.
@@ -110,7 +111,7 @@ class RHDIO(BaseIO):
 
         if lazy is False:
             try:
-                data = load_intan_rhd_format.read_data(self.filename)
+                data = load_intan_rhd_format.read_data(self.filename, parallelFlg=True)
             except load_intan_rhd_format.RHDError:
                 print("Error! The file may be corrupted!")
                 raise
@@ -196,41 +197,44 @@ class RHDIO(BaseIO):
 
         # Create event arrays from digital inputs
         # Loop through all rows of the digital input data and create event arrays
-        if header["num_board_dig_in_channels"] > 0:
-            sampling_rate = data["frequency_parameters"]["board_dig_in_sample_rate"]
-            # channel = header["board_dig_in_channels"][ii]["native_order"]
-            channels = [ch["native_order"] for ch in header["board_dig_in_channels"]]
-            channel_names = [ch["native_channel_name"] for ch in
+        if (header["num_board_dig_in_channels"]) > 0:
+            if storeDIG:
+                sampling_rate = data["frequency_parameters"]["board_dig_in_sample_rate"]
+                # channel = header["board_dig_in_channels"][ii]["native_order"]
+                channels = [ch["native_order"] for ch in header["board_dig_in_channels"]]
+                channel_names = [ch["native_channel_name"] for ch in
                              header["board_dig_in_channels"]]
-            channel_idx = ChannelIndex(name='EventData', index=channels,
+                channel_idx = ChannelIndex(name='EventData', index=channels,
                                        channel_names=channel_names,
                                        channel_details=header["board_dig_in_channels"])
-            for ii, digital_signal in enumerate(data["board_dig_in_data"]):
-                times = np.nonzero(digital_signal)[0] / sampling_rate
-                if len(times) < 1:
-                    continue
-                channel = header["board_dig_in_channels"][ii]["native_order"]
-                ea = Event(times=times*pq.s,
+                for ii, digital_signal in enumerate(data["board_dig_in_data"]):
+                    times = np.nonzero(digital_signal)[0] / sampling_rate
+                    if len(times) < 1:
+                        continue
+                    channel = header["board_dig_in_channels"][ii]["native_order"]
+                    ea = Event(times=times*pq.s,
                            name="Digital Input Events {}".format(channel),
                            channel_ids=channels[ii],
                            channel_names=channel_names[ii],
                            file_origin=self.filename,
                         #    channel_details=header["board_dig_in_channels"][ii],
                            sampling_rate=sampling_rate*pq.Hz)
-                #channel_idx.events.append(ea)
-                segment.events.append(ea)
-            block.channel_indexes.append(channel_idx)
-            block.create_many_to_one_relationship(force=True, recursive=True)
-            block.create_many_to_many_relationship()
-        segment.create_many_to_one_relationship()
+                    #channel_idx.events.append(ea)
+                    segment.events.append(ea)
+                block.channel_indexes.append(channel_idx)
+                block.create_many_to_one_relationship(force=True, recursive=True)
+                block.create_many_to_many_relationship()
+                segment.create_many_to_one_relationship()
+            else:
+                print(header["num_board_dig_in_channels"],' found in rhd file but will NOT be stored')
 
         del data
 
         return segment
 
-    def read_block(self, lazy=False, cascade=True, **kwargs):
+    def read_block(self, lazy=False, cascade=True, storeDIG=True, **kwargs):
         bl = Block(name=basename(self.filename), file_origin=self.filename)
-        segment = self.read_segment(lazy=lazy, cascade=cascade, block=bl, **kwargs)
+        segment = self.read_segment(lazy=lazy, cascade=cascade, block=bl, storeDIG=storeDIG, **kwargs)
 
         bl.segments.append(segment)
         bl.create_many_to_one_relationship()
