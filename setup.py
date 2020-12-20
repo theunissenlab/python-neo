@@ -6,7 +6,7 @@ import os
 
 long_description = open("README.rst").read()
 install_requires = ['numpy>=1.7.1',
-                    'quantities==0.12']
+                    'quantities>=0.12.4']
 dependency_links = [
 ]
 extras_require = {
