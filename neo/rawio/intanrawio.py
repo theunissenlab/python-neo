@@ -212,7 +212,8 @@ class IntanRawIO(BaseRawIO):
         # Data Integrity checks
         # strictness of check is controlled by ignore_integrity_checks
         # which is set at __init__
-        self._assert_timestamp_continuity()
+        if not self.ignore_integrity_checks:
+            self._assert_timestamp_continuity()
 
         # signals
         signal_channels = []
