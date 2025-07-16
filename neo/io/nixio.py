@@ -20,7 +20,7 @@ from __future__ import absolute_import
 
 import time
 from datetime import datetime
-from collections import Iterable
+from collections.abc import Iterable
 import itertools
 from hashlib import md5
 from uuid import uuid4
