@@ -79,7 +79,7 @@ def iteritems(D):
         return D.items()  # Python 3
 
 
-class LazyList(collections.MutableSequence):
+class LazyList(collections.abc.MutableSequence):
     """ An enhanced list that can load its members on demand. Behaves exactly
     like a regular list for members that are Neo objects. Each item should
     contain the information that ``load_lazy_cascade`` needs to load the
